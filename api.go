@@ -5,6 +5,7 @@ import (
 	"essence"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -26,9 +27,28 @@ var (
 	loggingMu            sync.RWMutex
 
 	formatTemplate string
+	colorEnabled   bool
+)
+
+// ANSI color codes
+const (
+	colorReset    = "\033[0m"
+	colorGray     = "\033[90m"
+	colorBlue     = "\033[94m"
+	colorCyan     = "\033[36m"
+	colorGreen    = "\033[32m"
+	colorYellow   = "\033[33m"
+	colorRed      = "\033[31m"
+	colorBoldRed  = "\033[1;31m"
+	colorCritical = "\033[97;41m" // bright white text, red background
 )
 
 func init() {
+	// Determine if colors should be enabled.
+	term := os.Getenv("TERM")
+	noColor := os.Getenv("NO_COLOR")
+	colorEnabled = (term != "dumb" && noColor == "")
+
 	// Initialize UUIDs first.
 	var err error
 	echoNamespaceUUID, err = essence.UUIDFromString(echoNamespaceStringRepresentation)
@@ -205,7 +225,7 @@ func echoLogGeneric(level LogLevel, systemID essence.UUID, content string, force
 		return
 	}
 	if forceShow || echoCanLog(config, level) {
-		echoLog(config.SystemPrefixes, content, level.String())
+		echoLog(config.SystemPrefixes, content, level.String(), level)
 	}
 }
 
@@ -223,7 +243,7 @@ func echoHandleMissingConfiguration(systemID essence.UUID, logLevel LogLevel, co
 		EchoLogWarning(echoNamespaceUUID, missingMsg, false)
 	} else {
 		if forceShow || echoCanLog(defaultConfig, logLevel) {
-			echoLog(defaultConfig.SystemPrefixes, content, logLevel.String())
+			echoLog(defaultConfig.SystemPrefixes, content, logLevel.String(), logLevel)
 		}
 	}
 }
@@ -236,7 +256,7 @@ func echoCanLog(config *EchoSystemConfiguration, logLevel LogLevel) bool {
 const echoTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
 //go:inline
-func echoLog(prefixes []string, content, logType string) {
+func echoLog(prefixes []string, content, logType string, level LogLevel) {
 	currentTime := time.Now().Local().Format(echoTimeLayout)
 
 	prefixesFormatted := strings.Join(prefixes, ".")
@@ -254,10 +274,36 @@ func echoLog(prefixes []string, content, logType string) {
 		completePrefix = completePrefix[:int(echoMaxPrefixLength)]
 	}
 
-	// pad log type so column aligns
 	logType = fmt.Sprintf("%-*s", echoMaxLogLevelStringLen(), logType)
 
-	fmt.Printf(formatTemplate, currentTime, completePrefix, logType, content)
+	colorStart := ""
+	colorEnd := ""
+	if colorEnabled {
+		switch level {
+		case TRACE:
+			colorStart = colorGray
+		case DEBUG:
+			colorStart = colorCyan
+		case INFO:
+			colorStart = colorGreen
+		case NOTICE:
+			colorStart = colorBlue
+		case WARNING:
+			colorStart = colorYellow
+		case ERROR:
+			colorStart = colorBoldRed
+		case CRITICAL:
+			colorStart = colorCritical
+		}
+		colorEnd = colorReset
+	}
+
+	line := fmt.Sprintf(formatTemplate, currentTime, completePrefix, logType, content)
+	if colorEnabled {
+		fmt.Printf("%s%s%s", colorStart, line, colorEnd)
+	} else {
+		fmt.Print(line)
+	}
 }
 
 // updateFormatTemplate rebuilds the printf format string for all future logs.
