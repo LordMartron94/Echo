@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
+
+	"github.com/mattn/go-isatty"
 )
 
 var (
 	formatTemplate string
 	colorEnabled   bool
+
+	paddedLogLevels []string
 )
 
 // ANSI color codes
@@ -28,12 +31,28 @@ const (
 const echoTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
 
 func init() {
-	term := os.Getenv("TERM")
-	noColor := os.Getenv("NO_COLOR")
-	colorEnabled = (term != "dumb" && noColor == "")
+	colorEnabled = shouldEnableColors()
+
+	paddedLogLevels = make([]string, CRITICAL+1)
+	for lvl := TRACE; lvl <= CRITICAL; lvl++ {
+		paddedLogLevels[lvl] = fmt.Sprintf("%-*s", echoMaxLogLevelStringLen(), lvl.String())
+	}
 
 	// Register the internal Echo system after setting the default template.
 	updateFormatTemplate()
+}
+
+func shouldEnableColors() bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+
+	if os.Getenv("FORCE_COLOR") != "" {
+		return true
+	}
+
+	fd := os.Stdout.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
 // updateFormatTemplate rebuilds the printf format string for all future logs.
@@ -53,19 +72,19 @@ func echoMaxLogLevelStringLen() int {
 	return max
 }
 
-func ConsoleOutputterCreate() LogOutputter {
+func ConsoleOutputterCreate() LogHook {
 	return func(log EchoLog) {
-		if log.forceShow || log.canShow {
-			echoLog(log.prefixes, log.message, log.level.String(), log.level)
+		if log.ForceShow || log.CanShow {
+			echoLog(log)
 		}
 	}
 }
 
 //go:inline
-func echoLog(prefixes []string, content, logType string, level LogLevel) {
-	currentTime := time.Now().Local().Format(echoTimeLayout)
+func echoLog(log EchoLog) {
+	currentTime := log.Time.Format(echoTimeLayout)
 
-	prefixesFormatted := strings.Join(prefixes, ".")
+	prefixesFormatted := strings.Join(log.Prefixes, ".")
 	var completePrefix string
 	if echoApplicationPrefix != "" {
 		completePrefix = echoApplicationPrefix
@@ -77,15 +96,14 @@ func echoLog(prefixes []string, content, logType string, level LogLevel) {
 	}
 
 	if len(completePrefix) > int(echoMaxPrefixLength) {
+		EchoLogWarning(echoNamespaceUUID, fmt.Sprintf("identifier longer than limit: got=%v,max=%v; truncating prefix", len(completePrefix), echoMaxPrefixLength), true)
 		completePrefix = completePrefix[:int(echoMaxPrefixLength)]
 	}
-
-	logType = fmt.Sprintf("%-*s", echoMaxLogLevelStringLen(), logType)
 
 	colorStart := ""
 	colorEnd := ""
 	if colorEnabled {
-		switch level {
+		switch log.Level {
 		case TRACE:
 			colorStart = colorGray
 		case DEBUG:
@@ -104,7 +122,9 @@ func echoLog(prefixes []string, content, logType string, level LogLevel) {
 		colorEnd = colorReset
 	}
 
-	line := fmt.Sprintf(formatTemplate, currentTime, completePrefix, logType, content)
+	logType := paddedLogLevels[log.Level]
+
+	line := fmt.Sprintf(formatTemplate, currentTime, completePrefix, logType, log.Message)
 	if colorEnabled {
 		fmt.Printf("%s%s%s", colorStart, line, colorEnd)
 	} else {

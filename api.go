@@ -136,32 +136,26 @@ func EchoSystemConfigurationReplace(systemID essence.UUID, newConfiguration Echo
 
 // EchoLog represents a single log entry used for processing inside custom hooks.
 type EchoLog struct {
-	level     LogLevel
-	message   string
-	forceShow bool
-	canShow   bool
-	id        essence.UUID
-	time      time.Time
-	prefixes  []string
+	Level     LogLevel
+	Message   string
+	ForceShow bool
+	CanShow   bool
+	Id        essence.UUID
+	Time      time.Time
+	Prefixes  []string
 }
 
-// OnLogHook represents a hook that executes on every log.
-type OnLogHook func(log EchoLog)
+// LogHook represents a hook that processes a log and outputs it in a certain way.
+type LogHook func(log EchoLog)
 
-// LogOutputter represents a hook that processes a log and outputs it in a certain way.
-type LogOutputter = OnLogHook
+var logHooks = make([]LogHook, 0)
+var logHookMu = &sync.RWMutex{}
 
-var hookRegistrations = make([]OnLogHook, 0)
-var logOutputters = make([]LogOutputter, 0)
-
-// EchoOnLogHookRegister registers a hook that executes on-log.
-func EchoOnLogHookRegister(hook OnLogHook) {
-	hookRegistrations = append(hookRegistrations, hook)
-}
-
-// EchoLogOutputterRegister registers an outputter for a log.
-func EchoLogOutputterRegister(outputter LogOutputter) {
-	logOutputters = append(logOutputters, outputter)
+// EchoLogHookRegister registers a hook executing on every log.
+func EchoLogHookRegister(outputter LogHook) {
+	logHookMu.Lock()
+	logHooks = append(logHooks, outputter)
+	logHookMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -246,20 +240,20 @@ func echoHandleMissingConfiguration(systemID essence.UUID, logLevel LogLevel, co
 func processLog(config *EchoSystemConfiguration, systemID essence.UUID, logLevel LogLevel, content string, forceShow bool) {
 	canLog := echoCanLog(config, logLevel)
 	log := EchoLog{
-		level:     logLevel,
-		message:   content,
-		forceShow: forceShow,
-		canShow:   canLog,
-		id:        systemID,
-		time:      time.Now().Local(),
-		prefixes:  config.SystemPrefixes,
+		Level:     logLevel,
+		Message:   content,
+		ForceShow: forceShow,
+		CanShow:   canLog,
+		Id:        systemID,
+		Time:      time.Now().Local(),
+		Prefixes:  config.SystemPrefixes,
 	}
 
-	for _, outputter := range logOutputters {
-		outputter(log)
-	}
+	logHookMu.RLock()
+	hooks := append([]LogHook(nil), logHooks...)
+	logHookMu.RUnlock()
 
-	for _, hook := range hookRegistrations {
+	for _, hook := range hooks {
 		hook(log)
 	}
 }
