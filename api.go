@@ -5,8 +5,6 @@ import (
 	"essence"
 	"fmt"
 	"log"
-	"os"
-	"strings"
 	"sync"
 	"time"
 )
@@ -25,30 +23,9 @@ var (
 
 	loggingConfiguration = make(map[essence.UUID]*EchoSystemConfiguration)
 	loggingMu            sync.RWMutex
-
-	formatTemplate string
-	colorEnabled   bool
-)
-
-// ANSI color codes
-const (
-	colorReset    = "\033[0m"
-	colorGray     = "\033[90m"
-	colorBlue     = "\033[94m"
-	colorCyan     = "\033[36m"
-	colorGreen    = "\033[32m"
-	colorYellow   = "\033[33m"
-	colorRed      = "\033[31m"
-	colorBoldRed  = "\033[1;31m"
-	colorCritical = "\033[97;41m" // bright white text, red background
 )
 
 func init() {
-	// Determine if colors should be enabled.
-	term := os.Getenv("TERM")
-	noColor := os.Getenv("NO_COLOR")
-	colorEnabled = (term != "dumb" && noColor == "")
-
 	// Initialize UUIDs first.
 	var err error
 	echoNamespaceUUID, err = essence.UUIDFromString(echoNamespaceStringRepresentation)
@@ -60,9 +37,6 @@ func init() {
 	if err != nil {
 		log.Fatalf("could not generate UUID from namespace: '%s'", defaultNamespaceStringRepresentation)
 	}
-
-	// Register the internal Echo system after setting the default template.
-	updateFormatTemplate()
 
 	EchoSystemRegister(echoNamespaceUUID, EchoSystemConfiguration{
 		MinLogLevel:    INFO,
@@ -102,16 +76,6 @@ func (l LogLevel) String() string {
 	default:
 		return "unknown"
 	}
-}
-
-func echoMaxLogLevelStringLen() int {
-	max := 0
-	for lvl := TRACE; lvl <= CRITICAL; lvl++ {
-		if n := len(lvl.String()); n > max {
-			max = n
-		}
-	}
-	return max
 }
 
 // EchoSystemConfiguration defines the configuration to use for a (sub-)system.
@@ -164,6 +128,40 @@ func EchoSystemConfigurationReplace(systemID essence.UUID, newConfiguration Echo
 	loggingMu.Lock()
 	defer loggingMu.Unlock()
 	loggingConfiguration[systemID] = &newConfiguration
+}
+
+// ---------------------------------------------------------------------------
+// Public Hooks
+// ---------------------------------------------------------------------------
+
+// EchoLog represents a single log entry used for processing inside custom hooks.
+type EchoLog struct {
+	level     LogLevel
+	message   string
+	forceShow bool
+	canShow   bool
+	id        essence.UUID
+	time      time.Time
+	prefixes  []string
+}
+
+// OnLogHook represents a hook that executes on every log.
+type OnLogHook func(log EchoLog)
+
+// LogOutputter represents a hook that processes a log and outputs it in a certain way.
+type LogOutputter = OnLogHook
+
+var hookRegistrations = make([]OnLogHook, 0)
+var logOutputters = make([]LogOutputter, 0)
+
+// EchoOnLogHookRegister registers a hook that executes on-log.
+func EchoOnLogHookRegister(hook OnLogHook) {
+	hookRegistrations = append(hookRegistrations, hook)
+}
+
+// EchoLogOutputterRegister registers an outputter for a log.
+func EchoLogOutputterRegister(outputter LogOutputter) {
+	logOutputters = append(logOutputters, outputter)
 }
 
 // ---------------------------------------------------------------------------
@@ -224,9 +222,7 @@ func echoLogGeneric(level LogLevel, systemID essence.UUID, content string, force
 		echoHandleMissingConfiguration(systemID, level, content, forceShow)
 		return
 	}
-	if forceShow || echoCanLog(config, level) {
-		echoLog(config.SystemPrefixes, content, level.String(), level)
-	}
+	processLog(config, systemID, level, content, forceShow)
 }
 
 //go:inline
@@ -242,73 +238,33 @@ func echoHandleMissingConfiguration(systemID essence.UUID, logLevel LogLevel, co
 	if !defaultOk {
 		EchoLogWarning(echoNamespaceUUID, missingMsg, false)
 	} else {
-		if forceShow || echoCanLog(defaultConfig, logLevel) {
-			echoLog(defaultConfig.SystemPrefixes, content, logLevel.String(), logLevel)
-		}
+		processLog(defaultConfig, systemID, logLevel, content, forceShow)
+	}
+}
+
+//go:inline
+func processLog(config *EchoSystemConfiguration, systemID essence.UUID, logLevel LogLevel, content string, forceShow bool) {
+	canLog := echoCanLog(config, logLevel)
+	log := EchoLog{
+		level:     logLevel,
+		message:   content,
+		forceShow: forceShow,
+		canShow:   canLog,
+		id:        systemID,
+		time:      time.Now().Local(),
+		prefixes:  config.SystemPrefixes,
+	}
+
+	for _, outputter := range logOutputters {
+		outputter(log)
+	}
+
+	for _, hook := range hookRegistrations {
+		hook(log)
 	}
 }
 
 //go:inline
 func echoCanLog(config *EchoSystemConfiguration, logLevel LogLevel) bool {
 	return logLevel >= config.MinLogLevel
-}
-
-const echoTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
-
-//go:inline
-func echoLog(prefixes []string, content, logType string, level LogLevel) {
-	currentTime := time.Now().Local().Format(echoTimeLayout)
-
-	prefixesFormatted := strings.Join(prefixes, ".")
-	var completePrefix string
-	if echoApplicationPrefix != "" {
-		completePrefix = echoApplicationPrefix
-		if len(prefixesFormatted) > 0 {
-			completePrefix += "." + prefixesFormatted
-		}
-	} else {
-		completePrefix = prefixesFormatted
-	}
-
-	if len(completePrefix) > int(echoMaxPrefixLength) {
-		completePrefix = completePrefix[:int(echoMaxPrefixLength)]
-	}
-
-	logType = fmt.Sprintf("%-*s", echoMaxLogLevelStringLen(), logType)
-
-	colorStart := ""
-	colorEnd := ""
-	if colorEnabled {
-		switch level {
-		case TRACE:
-			colorStart = colorGray
-		case DEBUG:
-			colorStart = colorCyan
-		case INFO:
-			colorStart = colorGreen
-		case NOTICE:
-			colorStart = colorBlue
-		case WARNING:
-			colorStart = colorYellow
-		case ERROR:
-			colorStart = colorBoldRed
-		case CRITICAL:
-			colorStart = colorCritical
-		}
-		colorEnd = colorReset
-	}
-
-	line := fmt.Sprintf(formatTemplate, currentTime, completePrefix, logType, content)
-	if colorEnabled {
-		fmt.Printf("%s%s%s", colorStart, line, colorEnd)
-	} else {
-		fmt.Print(line)
-	}
-}
-
-// updateFormatTemplate rebuilds the printf format string for all future logs.
-// It is called automatically whenever relevant parameters change.
-func updateFormatTemplate() {
-	formatTemplate = fmt.Sprintf("%%s - [%%-%ds] %%-%ds | %%s\n",
-		echoMaxPrefixLength, echoMaxLogLevelStringLen())
 }
