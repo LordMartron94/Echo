@@ -62,34 +62,14 @@ func DefaultConsoleConfigCreate() ConsoleConfig {
 	}
 }
 
-// ConsoleOutputterCreate creates a LogHook that writes to the provided writer (usually os.Stdout).
-func ConsoleOutputterCreate(w io.Writer, config ConsoleConfig) LogHook {
+// EchoConsoleOutputterCreate creates a LogHook that writes to the provided writer (usually os.Stdout).
+func EchoConsoleOutputterCreate(w io.Writer, config ConsoleConfig) LogHook {
 	return func(log EchoLog) {
 		if !log.ForceShow && !log.CanShow {
 			return
 		}
 
-		timestamp := formatTimestamp(log.Time, config)
-		prefix := formatPrefix(log.Prefixes)
-		level := paddedLogLevels[log.Level]
-		fields := formatFields(log.Fields)
-		source := formatSource(log.SourceFile, log.SourceLine, config)
-
-		// Assemble the final line
-		// Format: Time - [Prefix] LEVEL | Message key=val (source)
-		msg := fmt.Sprintf("%s - [%s] %s | %s%s%s\n",
-			timestamp,
-			prefix,
-			level,
-			log.Message,
-			fields,
-			source,
-		)
-
-		if config.UseColor {
-			msg = colorize(log.Level, msg)
-		}
-
+		msg := formatLogLine(log, config)
 		fmt.Fprint(w, msg)
 	}
 }
