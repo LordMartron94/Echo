@@ -2,17 +2,14 @@ package echo
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
-)
-
-var (
-	formatTemplate string
-	colorEnabled   bool
-
-	paddedLogLevels []string
 )
 
 // ANSI color codes
@@ -28,106 +25,172 @@ const (
 	colorCritical = "\033[97;41m" // bright white text, red background
 )
 
-const echoTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+const echoTimeLayout = "2006-01-02T15:04:05.000Z07:00"
+
+var paddedLogLevels []string
 
 func init() {
-	colorEnabled = shouldEnableColors()
-
+	// Pre-compute padded log levels for alignment
 	paddedLogLevels = make([]string, CRITICAL+1)
+	maxLen := 0
 	for lvl := TRACE; lvl <= CRITICAL; lvl++ {
-		paddedLogLevels[lvl] = fmt.Sprintf("%-*s", echoMaxLogLevelStringLen(), lvl.String())
+		str := lvl.String()
+		if len(str) > maxLen {
+			maxLen = len(str)
+		}
 	}
-
-	// Register the internal Echo system after setting the default template.
-	updateFormatTemplate()
+	for lvl := TRACE; lvl <= CRITICAL; lvl++ {
+		paddedLogLevels[lvl] = fmt.Sprintf("%-*s", maxLen, lvl.String())
+	}
 }
 
+// ConsoleConfig allows tweaking the output format per logger instance.
+type ConsoleConfig struct {
+	UseColor   bool
+	ShowTime   bool
+	ShowSource bool
+	TimeLayout string
+}
+
+// DefaultConsoleConfigCreate returns a sensible default configuration.
+func DefaultConsoleConfigCreate() ConsoleConfig {
+	return ConsoleConfig{
+		UseColor:   shouldEnableColors(),
+		ShowTime:   true,
+		ShowSource: false,
+		TimeLayout: echoTimeLayout,
+	}
+}
+
+// ConsoleOutputterCreate creates a LogHook that writes to the provided writer (usually os.Stdout).
+func ConsoleOutputterCreate(w io.Writer, config ConsoleConfig) LogHook {
+	return func(log EchoLog) {
+		if !log.ForceShow && !log.CanShow {
+			return
+		}
+
+		timestamp := formatTimestamp(log.Time, config)
+		prefix := formatPrefix(log.Prefixes)
+		level := paddedLogLevels[log.Level]
+		fields := formatFields(log.Fields)
+		source := formatSource(log.SourceFile, log.SourceLine, config)
+
+		// Assemble the final line
+		// Format: Time - [Prefix] LEVEL | Message key=val (source)
+		msg := fmt.Sprintf("%s - [%s] %s | %s%s%s\n",
+			timestamp,
+			prefix,
+			level,
+			log.Message,
+			fields,
+			source,
+		)
+
+		if config.UseColor {
+			msg = colorize(log.Level, msg)
+		}
+
+		fmt.Fprint(w, msg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Formatting Helpers
+// ---------------------------------------------------------------------------
+
+func formatTimestamp(t time.Time, config ConsoleConfig) string {
+	if !config.ShowTime {
+		return ""
+	}
+	return t.Format(config.TimeLayout)
+}
+
+func formatPrefix(prefixes []string) string {
+	full := strings.Join(prefixes, ".")
+	if echoApplicationPrefix != "" {
+		if len(full) > 0 {
+			full = echoApplicationPrefix + "." + full
+		} else {
+			full = echoApplicationPrefix
+		}
+	}
+
+	max := int(echoMaxPrefixLength)
+	if len(full) > max {
+		if max > 3 {
+			return full[:max-3] + "..."
+		}
+		return full[:max]
+	}
+
+	return fmt.Sprintf("%-*s", max, full)
+}
+
+func formatFields(fields map[string]interface{}) string {
+	if len(fields) == 0 {
+		return ""
+	}
+
+	// 1. Extract keys to sort them (ensure deterministic output)
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// 2. Build string
+	var sb strings.Builder
+	for _, k := range keys {
+		sb.WriteString(" ")
+
+		val := fields[k]
+
+		if s, ok := val.(string); ok && strings.Contains(s, " ") {
+			fmt.Fprintf(&sb, "%s=\"%v\"", k, s)
+		} else {
+			fmt.Fprintf(&sb, "%s=%v", k, val)
+		}
+	}
+	return sb.String()
+}
+
+func formatSource(file string, line int, config ConsoleConfig) string {
+	if !config.ShowSource || file == "" {
+		return ""
+	}
+	shortFile := filepath.Base(file)
+	return fmt.Sprintf(" (%s:%d)", shortFile, line)
+}
+
+func colorize(level LogLevel, line string) string {
+	colorStart := ""
+	switch level {
+	case TRACE:
+		colorStart = colorGray
+	case DEBUG:
+		colorStart = colorCyan
+	case INFO:
+		colorStart = colorGreen
+	case NOTICE:
+		colorStart = colorBlue
+	case WARNING:
+		colorStart = colorYellow
+	case ERROR:
+		colorStart = colorBoldRed
+	case CRITICAL:
+		colorStart = colorCritical
+	}
+	return fmt.Sprintf("%s%s%s", colorStart, line, colorReset)
+}
+
+// shouldEnableColors detects if the terminal supports color.
 func shouldEnableColors() bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
-
 	if os.Getenv("FORCE_COLOR") != "" {
 		return true
 	}
-
 	fd := os.Stdout.Fd()
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
-}
-
-// updateFormatTemplate rebuilds the printf format string for all future logs.
-// It is called automatically whenever relevant parameters change.
-func updateFormatTemplate() {
-	formatTemplate = fmt.Sprintf("%%s - [%%-%ds] %%-%ds | %%s\n",
-		echoMaxPrefixLength, echoMaxLogLevelStringLen())
-}
-
-func echoMaxLogLevelStringLen() int {
-	max := 0
-	for lvl := TRACE; lvl <= CRITICAL; lvl++ {
-		if n := len(lvl.String()); n > max {
-			max = n
-		}
-	}
-	return max
-}
-
-func ConsoleOutputterCreate() LogHook {
-	return func(log EchoLog) {
-		if log.ForceShow || log.CanShow {
-			echoLog(log)
-		}
-	}
-}
-
-//go:inline
-func echoLog(log EchoLog) {
-	currentTime := log.Time.Format(echoTimeLayout)
-
-	prefixesFormatted := strings.Join(log.Prefixes, ".")
-	var completePrefix string
-	if echoApplicationPrefix != "" {
-		completePrefix = echoApplicationPrefix
-		if len(prefixesFormatted) > 0 {
-			completePrefix += "." + prefixesFormatted
-		}
-	} else {
-		completePrefix = prefixesFormatted
-	}
-
-	if len(completePrefix) > int(echoMaxPrefixLength) {
-		EchoLogWarning(echoNamespaceUUID, fmt.Sprintf("identifier longer than limit: got=%v,max=%v; truncating prefix", len(completePrefix), echoMaxPrefixLength), true)
-		completePrefix = completePrefix[:int(echoMaxPrefixLength)]
-	}
-
-	colorStart := ""
-	colorEnd := ""
-	if colorEnabled {
-		switch log.Level {
-		case TRACE:
-			colorStart = colorGray
-		case DEBUG:
-			colorStart = colorCyan
-		case INFO:
-			colorStart = colorGreen
-		case NOTICE:
-			colorStart = colorBlue
-		case WARNING:
-			colorStart = colorYellow
-		case ERROR:
-			colorStart = colorBoldRed
-		case CRITICAL:
-			colorStart = colorCritical
-		}
-		colorEnd = colorReset
-	}
-
-	logType := paddedLogLevels[log.Level]
-
-	line := fmt.Sprintf(formatTemplate, currentTime, completePrefix, logType, log.Message)
-	if colorEnabled {
-		fmt.Printf("%s%s%s", colorStart, line, colorEnd)
-	} else {
-		fmt.Print(line)
-	}
 }
