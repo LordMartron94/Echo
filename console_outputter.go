@@ -4,10 +4,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"sort"
-	"strings"
-	"time"
 
 	"github.com/mattn/go-isatty"
 )
@@ -72,95 +68,6 @@ func EchoConsoleOutputterCreate(w io.Writer, config ConsoleConfig) LogHook {
 		msg := formatLogLine(log, config)
 		fmt.Fprint(w, msg)
 	}
-}
-
-// ---------------------------------------------------------------------------
-// Formatting Helpers
-// ---------------------------------------------------------------------------
-
-func formatTimestamp(t time.Time, config ConsoleConfig) string {
-	if !config.ShowTime {
-		return ""
-	}
-	return t.Format(config.TimeLayout)
-}
-
-func formatPrefix(prefixes []string) string {
-	full := strings.Join(prefixes, ".")
-	if echoApplicationPrefix != "" {
-		if len(full) > 0 {
-			full = echoApplicationPrefix + "." + full
-		} else {
-			full = echoApplicationPrefix
-		}
-	}
-
-	max := int(echoMaxPrefixLength)
-	if len(full) > max {
-		if max > 3 {
-			return full[:max-3] + "..."
-		}
-		return full[:max]
-	}
-
-	return fmt.Sprintf("%-*s", max, full)
-}
-
-func formatFields(fields map[string]interface{}) string {
-	if len(fields) == 0 {
-		return ""
-	}
-
-	// 1. Extract keys to sort them (ensure deterministic output)
-	keys := make([]string, 0, len(fields))
-	for k := range fields {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	// 2. Build string
-	var sb strings.Builder
-	for _, k := range keys {
-		sb.WriteString(" ")
-
-		val := fields[k]
-
-		if s, ok := val.(string); ok && strings.Contains(s, " ") {
-			fmt.Fprintf(&sb, "%s=\"%v\"", k, s)
-		} else {
-			fmt.Fprintf(&sb, "%s=%v", k, val)
-		}
-	}
-	return sb.String()
-}
-
-func formatSource(file string, line int, config ConsoleConfig) string {
-	if !config.ShowSource || file == "" {
-		return ""
-	}
-	shortFile := filepath.Base(file)
-	return fmt.Sprintf(" (%s:%d)", shortFile, line)
-}
-
-func colorize(level LogLevel, line string) string {
-	colorStart := ""
-	switch level {
-	case TRACE:
-		colorStart = colorGray
-	case DEBUG:
-		colorStart = colorCyan
-	case INFO:
-		colorStart = colorGreen
-	case NOTICE:
-		colorStart = colorBlue
-	case WARNING:
-		colorStart = colorYellow
-	case ERROR:
-		colorStart = colorBoldRed
-	case CRITICAL:
-		colorStart = colorCritical
-	}
-	return fmt.Sprintf("%s%s%s", colorStart, line, colorReset)
 }
 
 // shouldEnableColors detects if the terminal supports color.
