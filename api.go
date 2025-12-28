@@ -176,11 +176,55 @@ func EchoInternalPrefixRegister(prefix string) {
 	internalPrefixes = append(internalPrefixes, prefix)
 }
 
+/*
+EchoSystemLogLevelEnabled checks if a log level is enabled for a given system ID.
+
+This function provides a fast way to check if logging at a specific level will be processed
+for a system, allowing callers to avoid expensive string formatting operations when logging
+is disabled.
+
+Use cases:
+- Avoiding expensive fmt.Sprintf() calls when logging is disabled
+- Conditional logic based on log level availability
+- Performance optimization in hot paths
+
+Time complexity: O(1) - map lookup and simple comparison
+Space complexity: O(1) - no allocations
+
+Prerequisites:
+- systemID should be a registered system UUID (falls back to default if not found)
+
+Edge cases:
+- Returns false if systemID is not registered and no default config exists
+- Returns true if logLevel >= MinLogLevel for the system
+- Thread-safe (uses read lock)
+*/
+//go:inline
+func EchoSystemLogLevelEnabled(systemID essence.UUID, logLevel LogLevel) bool {
+	loggingMu.RLock()
+	config, ok := loggingConfiguration[systemID]
+	loggingMu.RUnlock()
+
+	if !ok {
+		loggingMu.RLock()
+		defaultConfig, defaultOk := loggingConfiguration[defaultNamespaceUUID]
+		loggingMu.RUnlock()
+
+		if !defaultOk {
+			return false
+		}
+		return echoCanLog(defaultConfig, logLevel)
+	}
+
+	return echoCanLog(config, logLevel)
+}
+
 // ---------------------------------------------------------------------------
 // Hooks & Processors
 // ---------------------------------------------------------------------------
 
 // EchoLog represents a single log entry, containing all metadata, structure, and context.
+// Expensive fields (SourceFile, SourceLine, Fields) are lazily evaluated via helper functions.
 type EchoLog struct {
 	Level      LogLevel
 	Message    string
@@ -189,13 +233,87 @@ type EchoLog struct {
 	Id         essence.UUID
 	Time       time.Time
 	Prefixes   []string
-	Fields     map[string]interface{} // Structured key-value pairs
-	SourceFile string                 // File path where the log originated
-	SourceLine int                    // Line number where the log originated
+	Fields     map[string]interface{} // Structured key-value pairs (lazily populated)
+	SourceFile string                 // File path where the log originated (lazily populated)
+	SourceLine int                    // Line number where the log originated (lazily populated)
+
+	// Raw data for lazy evaluation
+	RawFields  map[string]interface{} // Original fields before merging
+	RawCtx     context.Context        // Original context for field extraction
+	CallerSkip int                    // Number of frames to skip for source capture
 }
 
 // LogHook is a function that outputs a log (e.g., to Console, File, Splunk, Database).
 type LogHook func(log EchoLog)
+
+// ---------------------------------------------------------------------------
+// Lazy Evaluation Helpers
+// ---------------------------------------------------------------------------
+
+/*
+EchoLogGetSource lazily captures the source file and line number for a log entry.
+
+This function performs the expensive runtime.Callers operation on-demand, caching
+the result in the log entry. Subsequent calls return the cached value.
+
+Use cases:
+- Hooks that need source location information for debugging
+- File outputters that want full log details
+- Conditional source capture based on log level
+
+Time complexity: O(n) where n is call stack depth - only on first call, O(1) for cached calls
+Space complexity: O(1) - allocates fixed-size array for callers
+
+Prerequisites:
+- log.CallerSkip must be set correctly by the orchestrator
+
+Edge cases:
+- Returns "unknown", 0 if call stack cannot be determined
+- Caches result in log.SourceFile and log.SourceLine
+- Safe for concurrent use: hooks receive their own copy of the log (passed by value)
+*/
+func EchoLogGetSource(log *EchoLog) (string, int) {
+	if log.SourceFile != "" || log.SourceLine != 0 {
+		return log.SourceFile, log.SourceLine
+	}
+
+	file, line := captureSourceWithSkip(log.CallerSkip)
+	log.SourceFile = file
+	log.SourceLine = line
+	return file, line
+}
+
+/*
+EchoLogGetMergedFields lazily merges raw fields and context extractors for a log entry.
+
+This function performs the expensive field merging and context extraction on-demand,
+caching the result in the log entry. Subsequent calls return the cached value.
+
+Use cases:
+- Hooks that need structured field data
+- Outputters that format fields for display
+- Conditional field processing based on log level
+
+Time complexity: O(n+m) where n is field count, m is context extractor count - only on first call, O(1) for cached calls
+Space complexity: O(n) - allocates map for merged fields
+
+Prerequisites:
+- log.RawFields and log.RawCtx must be set by the orchestrator
+
+Edge cases:
+- Returns empty map if no fields and no context
+- Caches result in log.Fields
+- Safe for concurrent use: hooks receive their own copy of the log (passed by value)
+*/
+func EchoLogGetMergedFields(log *EchoLog) map[string]interface{} {
+	if log.Fields != nil {
+		return log.Fields
+	}
+
+	fields := mergeFieldsAndContext(log.RawFields, log.RawCtx)
+	log.Fields = fields
+	return fields
+}
 
 // LogProcessor is a middleware function that modifies a log *before* it is sent to hooks.
 // Usage Hint: Use this for masking PII or injecting global environment variables.
@@ -429,6 +547,7 @@ func echoLogInternal(level LogLevel, systemID essence.UUID, content string, fiel
 		echoHandleMissingConfiguration(systemID, level, content, forceShow)
 		return
 	}
+
 	processLog(config, systemID, level, content, fields, ctx, forceShow)
 }
 
@@ -441,19 +560,22 @@ func echoHandleMissingConfiguration(systemID essence.UUID, logLevel LogLevel, co
 	if !defaultOk {
 		msg := fmt.Sprintf("Missing config for '%s' and missing default config", systemID.String())
 		fmt.Fprintf(os.Stderr, "ECHO CRITICAL FAILURE: %s\n", msg)
-	} else {
-		// Log a debug message about the fallback, then proceed
-		EchoLogDebug(echoNamespaceUUID, fmt.Sprintf("Config missing for '%s', using default", systemID.String()), false)
-		processLog(defaultConfig, systemID, logLevel, content, nil, nil, forceShow)
+		return
 	}
+
+	// Log a debug message about the fallback, then proceed
+	EchoLogDebug(echoNamespaceUUID, fmt.Sprintf("Config missing for '%s', using default", systemID.String()), false)
+	processLog(defaultConfig, systemID, logLevel, content, nil, nil, forceShow)
 }
 
 //go:inline
 func processLog(config *EchoSystemConfiguration, systemID essence.UUID, logLevel LogLevel, content string, fields map[string]interface{}, ctx context.Context, forceShow bool) {
 	canLog := echoCanLog(config, logLevel)
 
-	finalFields := mergeFieldsAndContext(fields, ctx)
-	file, line := captureSource()
+	// Calculate caller skip depth for lazy source capture
+	// Call stack from EchoLogGetSource: runtime.Callers -> EchoLogGetSource -> hook -> safeExecuteHook -> dispatchToHooks -> processLog -> echoLogInternal -> user code
+	// We need to skip: runtime.Callers(1) + EchoLogGetSource(1) + hook(1) + safeExecuteHook(1) + dispatchToHooks(1) + processLog(1) + echoLogInternal(1) = 7
+	const callerSkipDepth = 7
 
 	logEntry := EchoLog{
 		Level:      logLevel,
@@ -463,9 +585,14 @@ func processLog(config *EchoSystemConfiguration, systemID essence.UUID, logLevel
 		Id:         systemID,
 		Time:       time.Now().Local(),
 		Prefixes:   config.SystemPrefixes,
-		Fields:     finalFields,
-		SourceFile: file,
-		SourceLine: line,
+		Fields:     nil, // Lazily populated via EchoLogGetMergedFields()
+		SourceFile: "",  // Lazily populated via EchoLogGetSource()
+		SourceLine: 0,   // Lazily populated via EchoLogGetSource()
+
+		// Raw data for lazy evaluation
+		RawFields:  fields,
+		RawCtx:     ctx,
+		CallerSkip: callerSkipDepth,
 	}
 
 	applyProcessors(&logEntry)
@@ -473,12 +600,12 @@ func processLog(config *EchoSystemConfiguration, systemID essence.UUID, logLevel
 }
 
 //go:inline
-func captureSource() (string, int) {
+func captureSourceWithSkip(skip int) (string, int) {
 	const maxDepth = 32
 	var pcs [maxDepth]uintptr
 
-	// Skip 2: runtime.Callers + captureSource
-	n := runtime.Callers(2, pcs[:])
+	// skip accounts for: runtime.Callers (1) + captureSourceWithSkip (1) + additional skip
+	n := runtime.Callers(skip, pcs[:])
 	if n == 0 {
 		return "unknown", 0
 	}

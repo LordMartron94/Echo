@@ -65,6 +65,10 @@ func EchoConsoleOutputterCreate(w io.Writer, config ConsoleConfig) LogHook {
 			return
 		}
 
+		// Lazy evaluation: only get expensive information when we actually need to output
+		EchoLogGetSource(&log)
+		EchoLogGetMergedFields(&log)
+
 		msg := formatLogLine(log, config)
 		fmt.Fprint(w, msg)
 	}

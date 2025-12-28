@@ -42,6 +42,11 @@ func EchoFileOutputterCreate(config FileConfig) (LogHook, error) {
 		mu.Lock()
 		defer mu.Unlock()
 
+		// Lazy evaluation: always get full information for file logging
+		// File outputters typically want all logs regardless of CanShow
+		EchoLogGetSource(&log)
+		EchoLogGetMergedFields(&log)
+
 		// Reuse the formatting logic we created for the console
 		// This ensures file and console look identical (except for color)
 		msg := formatLogLine(log, config.EmbeddedConfig)
