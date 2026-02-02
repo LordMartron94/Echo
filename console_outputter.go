@@ -40,7 +40,19 @@ func init() {
 	}
 }
 
-// ConsoleConfig allows tweaking the output format per logger instance.
+/*
+ConsoleConfig configures the console output format and behavior.
+
+ConsoleConfig controls how log entries are formatted and displayed in console
+output. It supports color coding, timestamp display, source location, and
+custom time formatting.
+
+Use cases:
+- Customizing console output for different environments
+- Disabling colors for non-terminal output
+- Controlling verbosity of log output
+- Custom time format requirements
+*/
 type ConsoleConfig struct {
 	UseColor   bool
 	ShowTime   bool
@@ -48,7 +60,29 @@ type ConsoleConfig struct {
 	TimeLayout string
 }
 
-// DefaultConsoleConfigCreate returns a sensible default configuration.
+/*
+DefaultConsoleConfigCreate returns a sensible default console configuration.
+
+This function creates a ConsoleConfig with sensible defaults: colors enabled
+if terminal supports them, timestamps enabled, source location disabled, and
+ISO 8601 time format.
+
+Use cases:
+- Quick setup with reasonable defaults
+- Starting point for custom configurations
+- Standard console output formatting
+
+Time complexity: O(1) - struct initialization
+Space complexity: O(1) - returns struct by value
+
+Prerequisites:
+- None
+
+Edge cases:
+- Color detection respects NO_COLOR and FORCE_COLOR environment variables
+- Automatically detects terminal capabilities
+- Returns configuration by value (safe to modify)
+*/
 func DefaultConsoleConfigCreate() ConsoleConfig {
 	return ConsoleConfig{
 		UseColor:   shouldEnableColors(),
@@ -58,7 +92,33 @@ func DefaultConsoleConfigCreate() ConsoleConfig {
 	}
 }
 
-// EchoConsoleOutputterCreate creates a LogHook that writes to the provided writer (usually os.Stdout).
+/*
+EchoConsoleOutputterCreate creates a LogHook that writes formatted log entries to a writer.
+
+This function creates a LogHook that formats log entries according to the provided
+ConsoleConfig and writes them to the specified writer. The outputter performs lazy
+evaluation of expensive operations (source location, field merging) only when the
+log will actually be displayed.
+
+Use cases:
+- Console output to os.Stdout or os.Stderr
+- Custom writer destinations (buffers, network connections)
+- Formatted log output with colors and timestamps
+- Standard console logging
+
+Time complexity: O(1) - returns function closure
+Space complexity: O(1) - captures writer and config in closure
+
+Prerequisites:
+- w should be a valid io.Writer (e.g., os.Stdout, os.Stderr)
+- config should be a valid ConsoleConfig
+
+Edge cases:
+- Respects log.CanShow and log.ForceShow flags
+- Performs lazy evaluation of source and fields
+- Thread-safe: each hook call is independent
+- Writer should handle concurrent writes if used from multiple goroutines
+*/
 func EchoConsoleOutputterCreate(w io.Writer, config ConsoleConfig) LogHook {
 	return func(log EchoLog) {
 		if !log.ForceShow && !log.CanShow {

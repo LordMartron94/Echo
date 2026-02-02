@@ -10,7 +10,25 @@ import (
 	"time"
 )
 
-// FileConfig configures the file output behavior.
+/*
+FileConfig configures the file output behavior and formatting.
+
+FileConfig controls where log files are stored, how they are named, how many
+old files to retain, and how entries are formatted. It embeds ConsoleConfig
+for formatting control, allowing file and console output to share formatting
+logic.
+
+Use cases:
+- Persistent log storage
+- Log rotation and cleanup
+- File-based log archiving
+- Consistent formatting between console and file output
+
+Performance:
+- Creates new file per application session
+- Automatic cleanup of old files in background
+- Uses same formatting logic as console outputter
+*/
 type FileConfig struct {
 	LogDirectory   string // Where to store logs
 	Filename       string // Base filename (e.g., "app.log" or just "app")
@@ -18,8 +36,36 @@ type FileConfig struct {
 	EmbeddedConfig ConsoleConfig
 }
 
-// EchoFileOutputterCreate creates a hook that creates a NEW file every time the application starts.
-// It automatically deletes the oldest files if the total count exceeds MaxFiles.
+/*
+EchoFileOutputterCreate creates a LogHook that writes log entries to timestamped files.
+
+This function creates a LogHook that writes log entries to files with timestamped
+names (e.g., "app-2024-01-01_12-00-00.log"). A new file is created each time the
+application starts. Old files are automatically cleaned up in the background if
+the total count exceeds MaxFiles.
+
+Use cases:
+- Persistent log storage with automatic rotation
+- Per-session log files
+- Log archiving and retention
+- File-based log analysis
+
+Time complexity: O(1) - file creation and hook registration
+Space complexity: O(1) - creates file handle and hook closure
+
+Prerequisites:
+- config.LogDirectory must be writable (will be created if missing)
+- config.Filename should be a valid filename (without extension)
+- config.MaxFiles should be >= 0 (0 disables cleanup)
+
+Edge cases:
+- Creates log directory if it doesn't exist
+- Returns error if directory creation fails
+- Cleanup runs in background goroutine (non-blocking)
+- File handle is kept open for the lifetime of the hook
+- Always performs full evaluation (source and fields) for file output
+- Thread-safe: uses mutex for concurrent writes
+*/
 func EchoFileOutputterCreate(config FileConfig) (LogHook, error) {
 	if err := os.MkdirAll(config.LogDirectory, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log dir: %w", err)
