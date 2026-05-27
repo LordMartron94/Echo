@@ -9,35 +9,57 @@ import (
 )
 
 func formatLogLine(log EchoLog, config ConsoleConfig) string {
-	segmentMeta := joinNonEmptySegments(
-		formatTimestamp(log.Time, config),
-		paddedLogLevels[log.Level],
-		formatPrefix(log.Prefixes),
-	)
+	var sb strings.Builder
 
-	segmentMessage := log.Message
-	segmentFields := formatFields(log.Fields)
-	segmentSource := formatSource(log.SourceFile, log.SourceLine, config)
+	// 1. Metadata Schema
+	if config.ShowTime {
+		sb.WriteString(formatTimestamp(log.Time, config))
+		sb.WriteString(" | ")
+	}
 
-	line := joinNonEmptySegments(
-		segmentMeta,
-		segmentMessage,
-		segmentFields,
-		segmentSource,
-	) + "\n"
+	sb.WriteString(paddedLogLevels[log.Level])
+	sb.WriteString(" | ")
+	sb.WriteString(formatPrefix(log.Prefixes))
+	sb.WriteString(" | ")
+
+	// 2. Payload Schema
+	sb.WriteString(formatMessageSafe(log.Message))
+	sb.WriteString(" | ")
+	sb.WriteString(formatFieldsSafe(log.Fields))
+
+	// 3. Trailing Source
+	if config.ShowSource {
+		sb.WriteString(" | ")
+		sb.WriteString(formatSourceSafe(log.SourceFile, log.SourceLine))
+	}
+
+	sb.WriteString("\n")
 
 	if config.UseColor {
-		return colorize(log.Level, line)
+		return colorize(log.Level, sb.String())
 	}
-	return line
+	return sb.String()
 }
 
-func formatSource(file string, line int, config ConsoleConfig) string {
-	if !config.ShowSource || file == "" {
-		return ""
+func formatMessageSafe(msg string) string {
+	if msg == "" {
+		return "-"
 	}
-	shortFile := filepath.Base(file)
-	return fmt.Sprintf("(%s:%d)", shortFile, line)
+	return msg
+}
+
+func formatFieldsSafe(fields map[string]interface{}) string {
+	if len(fields) == 0 {
+		return "-"
+	}
+	return formatFields(fields)
+}
+
+func formatSourceSafe(file string, line int) string {
+	if file == "" {
+		return "-"
+	}
+	return fmt.Sprintf("(%s:%d)", filepath.Base(file), line)
 }
 
 func colorize(level LogLevel, line string) string {
@@ -59,26 +81,6 @@ func colorize(level LogLevel, line string) string {
 		colorStart = colorCritical
 	}
 	return fmt.Sprintf("%s%s%s", colorStart, line, colorReset)
-}
-
-func joinNonEmpty(values ...string) string {
-	out := make([]string, 0, len(values))
-	for _, v := range values {
-		if v != "" {
-			out = append(out, v)
-		}
-	}
-	return strings.Join(out, " ")
-}
-
-func joinNonEmptySegments(segments ...string) string {
-	out := make([]string, 0, len(segments))
-	for _, s := range segments {
-		if s != "" {
-			out = append(out, s)
-		}
-	}
-	return strings.Join(out, " | ")
 }
 
 func formatTimestamp(t time.Time, config ConsoleConfig) string {
